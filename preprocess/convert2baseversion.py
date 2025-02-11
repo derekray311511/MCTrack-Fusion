@@ -6,7 +6,7 @@ import argparse
 
 from convert_kitti import kitti_main
 from convert_nuscenes import nuscenes_main
-from convert_waymo import waymo_main
+# from convert_waymo import waymo_main
 
 kitti_cfg = {
     "raw_data_path": "data/kitti/datasets",
@@ -17,11 +17,11 @@ kitti_cfg = {
 }
 
 nuscenes_cfg = {
-    "raw_data_path": "s3://wangxiyang/open_datasets/nuscenes/raw_data/",
-    "dets_path": "data/nuscenes/detectors/",
-    "save_path": "data/base_version/nuscenes/",
-    "detector": "largekernel",  #  centerpoint(val) / largekernel(test) / ....
-    "split": "test",  # val / test
+    "raw_data_path": "/data/nuscenes/",
+    "dets_path": "/data/nuscenes/detections/",
+    "save_path": "/data/nuscenes/detections/base_version/",
+    "detector": "centerpointPainted",  #  centerpoint(val) / largekernel(test) / ....
+    "split": "val",  # val / test
 }
 
 waymo_cfg = {

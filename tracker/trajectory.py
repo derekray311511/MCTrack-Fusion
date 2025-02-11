@@ -5,6 +5,7 @@
 import numpy as np
 import copy
 
+from copy import deepcopy
 from .bbox import BBox
 from typing import List
 from kalmanfilter.extend_kalman import *
@@ -237,6 +238,75 @@ class Trajectory:
             and self.bboxes[-1].det_score > self._confirmed_det_score
         ):
             self.status_flag = 1
+
+        return self.bboxes[-1]
+
+    def radar_update(self, radar_point, frame_id, matched_score):
+        current_bbox = deepcopy(self.bboxes[-1])
+        current_bbox.track_id = self.track_id
+        self.track_length += 1
+        current_bbox.track_length = self.track_length
+        self.last_updated_frame = frame_id
+        self.unmatch_length = 0
+
+        # 1. 從雷達測量中提取資訊
+        meas_x, meas_y = radar_point[0:2]
+        vx, vy = radar_point[3:5]
+        v_radial = np.linalg.norm([vx, vy])
+        
+        # 2. 獲取當前預測狀態（假設 kalman_filter_pose.state 含有 [x, y, vx, vy]）
+        #    如果 Kalman filter 的狀態向量名稱或結構不同，請根據實際情況調整。
+        pred_state = self.kalman_filter_pose.x  # 假設此處為 [x, y, vx, vy] 或更高維
+        x_pred, y_pred = pred_state[:2]
+        
+        # 3. 計算目標相對於雷達或預測方向的角度 theta
+        #    這裡提供兩種選擇：
+        #  (a) 根據預測位置與雷達感測器位置計算：
+        rel_pos = np.array([x_pred[0], y_pred[0]]) - np.array([meas_x, meas_y])
+        theta = np.arctan2(rel_pos[1], rel_pos[0])
+        # 或者 (b) 根據預測速度計算（若速度較穩定）：
+        # theta = np.arctan2(pred_state[3], pred_state[2])
+        
+        # 4. 根據 theta 將徑向速度補全為 2D 速度分量
+        v_x = v_radial * np.cos(theta)
+        v_y = v_radial * np.sin(theta)
+        
+        # 5. 組合測量向量 (如果 kalman_filter_pose 的 m == 2 表示只用位置，可僅傳 [x, y])
+        # 這裡假設我們使用完整的 4 維測量向量
+        z_radar = np.array([meas_x, meas_y, pred_state[2][0], pred_state[3][0]])
+
+        # 6. 使用 Kalman filter 進行更新
+        update_state = self.kalman_filter_pose.update(z_radar)
+        
+        # 7. 更新 bbox 中的相關資訊（例如全局位置、速度等）：
+        #    這裡僅作示例，根據實際情況更新 fusion 信息
+        updated_position = update_state[:2]
+        updated_velocity = update_state[2:4]
+
+        # 更新當前最新的 bbox 信息（假設 self.bboxes[-1] 為當前 bbox）
+        current_bbox.global_xyz_lwh_yaw_fusion[:2] = updated_position.tolist()
+        # 此處根據需求更新速度融合資訊
+        current_bbox.global_velocity_fusion = updated_velocity.tolist()
+        
+        # 8. 更新 matched_score 與其他追蹤相關資訊
+        current_bbox.matched_score = matched_score
+
+        if self.track_length > self._confirmed_track_length or (
+            matched_score > self._confirmed_match_score
+            and self.bboxes[-1].det_score > self._confirmed_det_score
+        ):
+            self.status_flag = 1
+
+        self.bboxes.append(current_bbox)
+        self.matched_scores.append(matched_score)
+
+        global_velocity_diff = self.cal_diff_velocity()
+        self.bboxes[-1].global_velocity_diff = global_velocity_diff
+        global_velocity_curve = self.cal_curve_velocity()
+        self.bboxes[-1].global_velocity_curve = global_velocity_curve
+
+        if len(self.bboxes) > self._cache_bbox_len:
+            self.bboxes.pop(0)
 
         return self.bboxes[-1]
 

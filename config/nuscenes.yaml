@@ -6,10 +6,12 @@ DATASET: "nuscenes"
 
 # dataset info
 SPLIT: "val" # val, test
-DETECTOR: centerpoint  # centerpoint, largekernel
-DATASET_ROOT: "s3://wangxiyang/open_datasets/nuscenes/raw_data/" 
+DETECTOR: centerpoint_author  # centerpoint, largekernel
+DATASET_ROOT: "/data/nuscenes/" 
+RADAR_PATH: "/data/radar_PC/radar_PC_baseVersion.json"
+GT_PATH: "/data/meta_data(gt_w_vel)/annotations.json"
 # DATASET_ROOT: "data/nuscenes/datasets/"  # 开源用这个
-DETECTIONS_ROOT: "data/base_version/nuscenes/"
+DETECTIONS_ROOT: "/data/nuscenes/detections/base_version/"
 SAVE_PATH: "results/"
 TRACKING_MODE: 'ONLINE' # ONLINE / GLOBAL
 IS_RV_MATCHING: False  # True / False
@@ -62,6 +64,8 @@ THRESHOLD:
     }
   RV:
     COST_THRE: {0: -0.3, 1: -0.3, 2: -0.3, 3: -0.3, 4: -0.3, 5: -0.3, 6: -0.3} 
+  RADAR:
+    DIST_THRE: {0: 3.0, 1: 1.0, 2: 2.5, 3: 4.0, 4: 5.5, 5: 2.0, 6: 4.0}
 
   TRAJECTORY_THRE:
     CACHE_BBOX_LENGTH: {0: 30, 1: 30, 2: 30, 3: 30, 4: 30, 5: 30, 6: 30} 
@@ -252,3 +256,85 @@ KALMAN_FILTER_RVBOX:
         P: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         Q: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
         R: [2.0, 2.0, 2.0, 2.0]
+
+RadarSegmentation:
+  method: "Mix"  # DBSCAN, LRSegmentor, Mix
+  DBSCAN:
+    eps: 1.5
+    min_samples: 3
+    vel_th: 1.0
+    # metric: "euclidean"
+    # algorithm: "auto"
+    # leaf_size: 30
+    # p: None
+    # n_jobs: None
+  LRSegmentor:
+    min_samples: 3
+    lidar_score_th: 0.025
+    expand_ratio: [1.2, 1.2]    # w, l
+
+VISUALIZER:
+  nusc_cfg:
+    dataroot: "/data/nuscenes/"
+    version: "v1.0-trainval"
+    verbose: True
+  viz_cat:
+    - 'bicycle'
+    - 'bus'
+    - 'car'
+    - 'motorcycle'
+    - 'trailer'
+    - 'truck'
+    - 'pedestrian'
+    - 'background'
+  range_: [100, 100]
+  screenSize: [1920, 1080]
+  windowSize: [920, 1000]
+  imgSize: [3200, 3200]
+  duration: 0.001
+  background_color: [50, 50, 50]
+  grid: False
+  frameRate: 2 # Important for visualization (for velocity)
+  camera:
+    draw: True
+  lidarPts:
+    draw: True
+    radius: 4
+    BGRcolor: [200, 200, 200]
+  radarPts:
+    draw: False
+    radius: 8
+    draw_vel: True
+    thickness: 4
+    BGRcolor: [50, 50, 255]
+  radarSeg:
+    draw: True
+    radius: 8
+    colorID: True
+    colorName: False
+    contours: False
+    draw_vel: True
+    thickness: 4
+  detBox:
+    draw: False
+    score_th: 0.01
+    colorName: False
+    BGRcolor: [255, 150, 150]
+    draw_vel: True
+    thickness: 4
+  trkBox:
+    colorName: True
+    colorID: False
+    BGRcolor: [52, 171, 235]
+    draw_name: False
+    draw_vel: True
+    draw_id: False
+    thickness: 4
+  groundTruth:
+    colorName: False
+    colorID: False
+    BGRcolor: [50, 50, 240]
+    draw_vel: False
+    draw_id: False
+    thickness: -1   # -1 means Filled
+    alpha: 0.5

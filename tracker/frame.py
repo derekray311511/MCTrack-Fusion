@@ -21,3 +21,4 @@ class Frame:
         self.transform_matrix = transform_matrix
 
         self.bboxes: List[BBox] = []
+        self.radar: List = []

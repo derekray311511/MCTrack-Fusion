@@ -12,9 +12,10 @@ from utils.nusc_utils import obtain_box_bottom_corners, filter_bboxes_with_nms
 
 
 class BaseVersionTrackingDataset:
-    def __init__(self, scene_id, scene_data, cfg):
+    def __init__(self, scene_id, scene_data, scene_radar, cfg):
         self.scene_id = scene_id
         self.scene_data = scene_data
+        self.scene_radar = scene_radar
         self.cfg = cfg
 
     def __len__(self):
@@ -27,6 +28,7 @@ class BaseVersionTrackingDataset:
         cur_sample_token = frame_info["cur_sample_token"]
         transform_matrix = frame_info["transform_matrix"]
         bboxes = frame_info["bboxes"]
+        frame_radar = self.scene_radar[index]
 
         cur_frame = Frame(
             frame_id=int(frame_id),
@@ -58,4 +60,7 @@ class BaseVersionTrackingDataset:
                 filtered_bboxes = filter_bboxes_with_nms(filtered_bboxes, self.cfg)
         for bbox in filtered_bboxes:
             cur_frame.bboxes.append(BBox(frame_id, bbox))
+
+        cur_frame.radar = frame_radar # [[-n+1_rpc], [-n+2_rpc], [-n+3_rpc], ..., [0_rpc]]
+        
         return cur_frame
