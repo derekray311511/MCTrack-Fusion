@@ -285,3 +285,77 @@ def match_trajs_and_radars(trajs, radar_points, cfg):
         costs = np.array(costs)
 
     return matched_indices, costs
+
+def match_lidar_and_radar(dets, radar_points, cfg):
+    """
+    Matches trajectories with radar points using Global Nearest Neighbor (GNN) matching
+    via the Hungarian algorithm.
+
+    Parameters:
+        trajs (list): List of trajectory objects. Each trajectory is assumed to have a predicted
+                      2D position accessible as traj.bboxes[-1].global_xyz_lwh_yaw_predict.
+        radar_points (np.ndarray): Array of radar points (shape: [N, D]), where the first two columns
+                                   represent the (x, y) world coordinates.
+        cfg (dict): Configuration dictionary. This function looks for a matching threshold under:
+                    cfg["THRESHOLD"]["RADAR"]["DIST_THRE"]
+                    If not found, a default threshold (e.g., 4.0) is used.
+
+    Returns:
+        matched_indices (np.ndarray): An array of shape [M, 2] where each row is [traj_index, radar_index].
+        costs (np.ndarray): A 1D array of the matching costs for each matched pair.
+    """
+    if len(dets) == 0 or radar_points.shape[0] == 0:
+        return np.empty((0, 2), dtype=int), np.empty((0,))
+
+    # -------------------------------------------------------------------------
+    # 1. Build the cost matrix between each trajectory and each radar point.
+    #    We assume that each trajectory has a Kalman filter (e.g., CV, CA, or CTRA) that
+    #    stores the predicted state in .x, with the first two entries being [x, y].
+    # -------------------------------------------------------------------------
+    pred_positions = np.zeros((len(dets), 2))
+    for i, det in enumerate(dets):
+        bbox = det
+        pose = bbox.global_xyz_lwh_yaw
+        pred_positions[i] = pose[:2]
+    radar_positions = radar_points[:, :2]
+
+    # Compute the Euclidean distance for each (trajectory, radar_point) pair.
+    # Resulting cost_matrix has shape (n_trajs, n_radars)
+    diff = pred_positions[:, None, :] - radar_positions[None, :, :]
+    cost_matrix = np.linalg.norm(diff, axis=2)
+
+    # -------------------------------------------------------------------------
+    # 2. Retrieve the matching threshold from the configuration.
+    #    (You can change the default value as appropriate.)
+    # -------------------------------------------------------------------------
+    thresholds = cfg.get("THRESHOLD", {}).get("RADAR", {}).get("DIST_THRE", {})
+
+    # -------------------------------------------------------------------------
+    # 3. Solve the assignment problem using the Hungarian algorithm.
+    #    The lap.lapjv function returns an assignment for each trajectory:
+    #      - For each trajectory i, x[i] is the index of the radar point assigned to it,
+    #        or -1 if no assignment was made (or if the cost exceeded the threshold).
+    # -------------------------------------------------------------------------
+
+    matched_indices = []
+    costs = []
+
+    for i, det in enumerate(dets):
+        category = det.category
+        radar_cost_threshold = thresholds.get(category, 4.0)  # 默認閾值為 4.0
+
+        _, x, _ = lap.lapjv(cost_matrix[i:i+1, :], extend_cost=True, cost_limit=radar_cost_threshold)
+        
+        radar_idx = x[0]
+        if radar_idx >= 0 and cost_matrix[i, radar_idx] <= radar_cost_threshold:
+            matched_indices.append([i, radar_idx])
+            costs.append(cost_matrix[i, radar_idx])
+
+    if len(matched_indices) == 0:
+        matched_indices = np.empty((0, 2), dtype=int)
+        costs = np.empty((0,))
+    else:
+        matched_indices = np.array(matched_indices, dtype=int)
+        costs = np.array(costs)
+
+    return matched_indices, costs
