@@ -150,7 +150,7 @@ class EKF_CV(KF_Base):
     """
 
     def __init__(
-        self, n=4, m=2, dt=None, P=None, Q=None, R=None, init_x=None, cfg=None
+        self, n=4, m=2, dt=None, P=None, Q=None, R=None, R_RADAR=None, init_x=None, cfg=None
     ):
         KF_Base.__init__(self, n=n, m=m, P=P, Q=Q, R=R, init_x=init_x, cfg=None)
 
@@ -159,6 +159,8 @@ class EKF_CV(KF_Base):
         self.JH = np.matrix(np.eye(self.m, 4))
         self.F = self.getF(self.x)
         self.H = self.getH(self.x)
+        self.R_LIDAR = R
+        self.R_RADAR = R_RADAR
 
     def f(self, x):
         # State-transition function is identity
@@ -192,6 +194,61 @@ class EKF_CV(KF_Base):
     def getH(self, x):
         # So observation Jacobian is identity matrix
         return self.JH
+    
+    def get_jacobian_lidar(self):
+        self.JH = np.matrix(np.eye(self.m, 4))
+        self.H = self.getH(self.x)
+
+    def get_jacobian_radar(self):
+        px, py, vx, vy = np.array(self.x).flatten()
+        c1 = px**2 + py**2
+        if abs(c1) < 1e-4:
+            return np.zeros((3, 4))
+
+        c2 = np.sqrt(c1)
+        c3 = c1 * c2
+
+        jacobian = np.array([
+            [px/c2, py/c2, 0, 0],
+            [-py/c1, px/c1, 0, 0],
+            [py*(vx*py - vy*px)/c3, px*(px*vy - py*vx)/c3, px/c2, py/c2]
+        ])
+        self.H = jacobian
+        return jacobian
+
+    def _normalize_angle(self, angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
+    def update_radar(self, z):
+        # print(f"updateRadar: \nself.x: {self.x.flatten()}")
+        px, py, vx, vy = np.array(self.x).flatten()
+        rho = np.sqrt(px**2 + py**2)
+        theta = np.arctan2(py, px)
+        rho_dot = (px * vx + py * vy) / rho if rho > 0 else 0
+        h = np.array([rho, theta, rho_dot])
+        z = np.array(z)
+        # print(f"h: {h}\nz: {z}")
+
+        y = z - h
+        y[1] = self._normalize_angle(y[1])
+
+        # Predict ----------------------------------------------------
+        self.x = self.f(self.x)
+        self.F = self.getF(self.x)
+        self.P = self.F * self.P * self.F.T + self.Q
+        # print(f"predict self.x: {self.x.flatten()}")
+
+        # Update -----------------------------------------------------
+        Ht = self.H.T
+        S = np.dot(self.H, np.dot(self.P, Ht)) + self.R
+        K = np.dot(np.dot(self.P, Ht), np.linalg.inv(S))
+
+        y = np.array(y).reshape(-1, 1)
+        self.x = self.x + np.dot(K, y)
+        I = np.eye(len(self.x))
+        self.P = (I - np.dot(K, self.H)) @ self.P
+        # print(f"After update self.x: {self.x.flatten()}")
+        return np.array(self.x.reshape(self.n))
 
     def update(self, z):
         """
