@@ -368,12 +368,17 @@ class TrackVisualizer:
                     self._draw_score(g_det, BGRcolor, **kwargs)
                 legends[k] = (BGRcolor, f"{k}: {len(g_det)}")
             if legend:
-                legend_x = 20
-                legend_y = 20
-                legend_spacing = 40
+                scale = self.height / 1600.0  # 假設預設是1600
+                legend_x = int(20 * scale)
+                legend_y = int(20 * scale)
+                legend_spacing = int(40 * scale)
+                rect_size = int(30 * scale)
+                font_scale = 1.5 * scale
+                font_thickness = max(1, int(2 * scale))  # 避免字體太細
                 for (color, text) in legends.values():
-                    cv2.rectangle(self.image, (legend_x, legend_y), (legend_x + 30, legend_y + 30), color, thickness)
-                    cv2.putText(self.image, text, (legend_x + 50, legend_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 2)
+                    cv2.rectangle(self.image, (legend_x, legend_y), (legend_x + rect_size, legend_y + rect_size), color, thickness)
+                    cv2.putText(self.image, text, (legend_x + rect_size + int(20 * scale), legend_y + rect_size), 
+                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
                     legend_y += legend_spacing
 
         elif colorID and ('tracking_id' in nusc_det[0]):
