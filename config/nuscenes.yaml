@@ -7,11 +7,11 @@ DATASET: "nuscenes"
 # dataset info
 SPLIT: "val" # val, test
 DETECTOR: centerpoint_author  # centerpoint, largekernel
-DATASET_ROOT: "/data/nuscenes/" 
-RADAR_PATH: "/data/radar_PC/radar_PC_baseVersion.json"
-GT_PATH: "/data/meta_data(gt_w_vel)/annotations.json"
+DATASET_ROOT: "/data/Nuscenes/small_data2"
+RADAR_PATH: "/data/Nuscenes/radar_PC/radar_PC_baseVersion.json"
+GT_PATH: "/data/Nuscenes/meta_data(gt_w_vel)/annotations.json"
 # DATASET_ROOT: "data/nuscenes/datasets/"  # 开源用这个
-DETECTIONS_ROOT: "/data/nuscenes/detections/base_version/"
+DETECTIONS_ROOT: "/data/Nuscenes/detections/base_version/"
 SAVE_PATH: "results/"
 TRACKING_MODE: 'ONLINE' # ONLINE / GLOBAL
 IS_RV_MATCHING: False  # True / False
@@ -83,34 +83,48 @@ KALMAN_FILTER_POSE:
     N: 4   # State Dimension
     M: 4   # Measure Dimension
     NOISE:
-      0:
+      0:  # car
         P: [1.0, 1.0, 10.0, 10.0]
         Q: [0.5, 0.5, 1.5, 1.5]
         R: [0.7, 0.7, 0.5, 0.5]
-      1:
+        R_RADAR: [1.0, 0.0009, 0.09]
+        R_RADAR_FUSE: [200.0, 90, 0.09]
+      1:  # pedestrian
         P: [1.0, 1.0, 10.0, 10.0]
         Q: [1.5, 1.5, 1.5, 1.5]
         R: [2.0, 2.0, 3.5, 3.5]
-      2:
+        R_RADAR: [4.0, 0.0009, 0.09]
+        R_RADAR_FUSE: [400.0, 90, 0.09]
+      2:  # bicycle
         P: [1.0, 1.0, 1.0, 1.0]
         Q: [0.3, 0.3, 1.0, 1.0]
         R: [0.1, 0.1, 1.0, 1.0]
-      3:
+        R_RADAR: [0.2, 0.0009, 0.09]
+        R_RADAR_FUSE: [20.0, 90, 0.09]
+      3:  # motorcycle
         P: [1.0, 1.0, 10.0, 10.0]
         Q: [0.5, 0.5, 4.0, 4.0]
         R: [0.1, 0.1, 0.1, 0.1]
-      4:
+        R_RADAR: [0.2, 0.0009, 0.09]
+        R_RADAR_FUSE: [20.0, 90, 0.09]
+      4:  # bus
         P: [100.0, 100.0, 100.0, 100.0]
         Q: [0.5, 0.5, 1.5, 1.5]
         R: [1.5, 1.5, 500, 500]
-      5:
+        R_RADAR: [4.0, 0.9, 0.09]
+        R_RADAR_FUSE: [800.0, 90, 0.09]
+      5:  # trailer
         P: [1.0, 1.0, 10.0, 10.0]
         Q: [0.3, 0.3, 0.1, 0.1]
         R: [2.0, 2.0, 2.5, 2.5]
-      6:
+        R_RADAR: [4.0, 0.0009, 0.09]
+        R_RADAR_FUSE: [400.0, 90, 0.09]
+      6:  # truck
         P: [1.0, 1.0, 10.0, 10.0]
         Q: [0.1, 0.1, 2.0, 2.0]
         R: [1.5, 1.5, 4.0, 4.0]
+        R_RADAR: [3.0, 0.0009, 0.09]
+        R_RADAR_FUSE: [300.0, 90, 0.09]
   CA:
     N: 6   # State Dimension
     M: 2   # Measure Dimension
@@ -258,7 +272,7 @@ KALMAN_FILTER_RVBOX:
         R: [2.0, 2.0, 2.0, 2.0]
 
 RadarSegmentation:
-  method: "Mix"  # DBSCAN, LRSegmentor, Mix
+  method: "MixTrack"  # DBSCAN, LRSegmentor, Mix, MixTrack
   DBSCAN:
     eps: 1.5
     min_samples: 3
@@ -270,12 +284,24 @@ RadarSegmentation:
     # n_jobs: None
   LRSegmentor:
     min_samples: 3
-    lidar_score_th: 0.025
+    lidar_score_th: 0.25
     expand_ratio: [1.2, 1.2]    # w, l
+
+EVALUATION:
+  tp_distance: 3.0
+  custom_range: True
+  range:
+    bicycle: 100
+    motorcycle: 100
+    pedestrian: 100
+    bus: 100
+    car: 100
+    trailer: 100
+    truck: 100
 
 VISUALIZER:
   nusc_cfg:
-    dataroot: "/data/nuscenes/"
+    dataroot: "/data/Nuscenes/small_data2"
     version: "v1.0-trainval"
     verbose: True
   viz_cat:
@@ -287,10 +313,10 @@ VISUALIZER:
     - 'truck'
     - 'pedestrian'
     - 'background'
-  range_: [100, 100]
+  range_: [200, 200]
   screenSize: [1920, 1080]
   windowSize: [920, 1000]
-  imgSize: [3200, 3200]
+  imgSize: [1600,1600]
   duration: 0.001
   background_color: [50, 50, 50]
   grid: False
@@ -299,29 +325,29 @@ VISUALIZER:
     draw: True
   lidarPts:
     draw: True
-    radius: 4
+    radius: 2
     BGRcolor: [200, 200, 200]
   radarPts:
     draw: False
-    radius: 8
+    radius: 4
     draw_vel: True
-    thickness: 4
+    thickness: 2
     BGRcolor: [50, 50, 255]
   radarSeg:
     draw: True
-    radius: 8
+    radius: 4
     colorID: True
     colorName: False
     contours: False
     draw_vel: True
-    thickness: 4
+    thickness: 2
   detBox:
     draw: False
     score_th: 0.01
     colorName: False
     BGRcolor: [255, 150, 150]
     draw_vel: True
-    thickness: 4
+    thickness: 2
   trkBox:
     colorName: True
     colorID: False
@@ -329,7 +355,7 @@ VISUALIZER:
     draw_name: False
     draw_vel: True
     draw_id: False
-    thickness: 4
+    thickness: 2
   groundTruth:
     colorName: False
     colorID: False
