@@ -26,6 +26,7 @@ from utils.nusc_utils import save_results_nuscenes, save_results_nuscenes_for_mo
 from utils.waymo_utils.convert_result import save_results_waymo
 from fishUtils import TrackVisualizer
 from utils.utils import transform_yaw2quaternion
+import shutil
 
 total_index = 0
 
@@ -90,6 +91,8 @@ def run(scene_id, scenes_data, radar_data, cfg, args, tracking_results, visualiz
                 cfg["VISUALIZER"]["radarSeg"]["draw"] = not cfg["VISUALIZER"]["radarSeg"]["draw"]
             elif key == ord('c'):
                 cfg["VISUALIZER"]["camera"]["draw"] = not cfg["VISUALIZER"]["camera"]["draw"]
+            elif key == ord('i'):
+                cfg["VISUALIZER"]["trkBox"]["draw_id"] = not cfg["VISUALIZER"]["trkBox"]["draw_id"]
             elif key == ord('q'): # next scene
                 total_index += len(dataset) - index
                 break
@@ -130,7 +133,7 @@ def run(scene_id, scenes_data, radar_data, cfg, args, tracking_results, visualiz
                 sample_results.append(box_result)
             # Visualize
             cv2.setTrackbarPos('Frame', visualizer.windowName, total_index)
-            visualizer.draw_ego_car(img_src="/data/car1.png")
+            visualizer.draw_ego_car(img_src="/data/Nuscenes/car1.png")
             if cfg["VISUALIZER"]["lidarPts"]["draw"]:
                 visualizer.draw_lidar_pts(cur_sample_token, **cfg["VISUALIZER"]["lidarPts"])
             if cfg["VISUALIZER"]["radarPts"]["draw"]:
@@ -207,13 +210,17 @@ if __name__ == "__main__":
 
     cfg = yaml.load(open(cfg_path, "r"), Loader=yaml.Loader)
 
+    additional_name = "_Mix_threeStage_th-0.25+MixTrack_MixUpdate"
     save_path = os.path.join(
         os.path.dirname(cfg["SAVE_PATH"]),
         cfg["DATASET"],
-        datetime.now().strftime("%Y%m%d_%H%M%S"),
+        datetime.now().strftime("%Y%m%d_%H%M%S") + additional_name,
     )
     os.makedirs(save_path, exist_ok=True)
     cfg["SAVE_PATH"] = save_path
+
+    # Copy config file to save path
+    shutil.copy(cfg_path, os.path.join(save_path, os.path.basename(cfg_path)))
 
     start_time = time.time()
 
