@@ -85,6 +85,7 @@ class Trajectory:
             Q=np.diag(cfg["KALMAN_FILTER_POSE"]["CV"]["NOISE"][self.category_num]["Q"]),
             R=np.diag(cfg["KALMAN_FILTER_POSE"]["CV"]["NOISE"][self.category_num]["R"]),
             R_RADAR=np.diag(cfg["KALMAN_FILTER_POSE"]["CV"]["NOISE"][self.category_num]["R_RADAR"]),
+            R_RADAR_FUSE=np.diag(cfg["KALMAN_FILTER_POSE"]["CV"]["NOISE"][self.category_num]["R_RADAR_FUSE"]),
             init_x=cv_init_pose,
         )
         self.ca_filter_pose  = EKF_CA(
@@ -258,7 +259,7 @@ class Trajectory:
         
         # # 2. 獲取當前預測狀態（假設 kalman_filter_pose.state 含有 [x, y, vx, vy]）
         # #    如果 Kalman filter 的狀態向量名稱或結構不同，請根據實際情況調整。
-        # pred_state = self.kalman_filter_pose.x  # 假設此處為 [x, y, vx, vy] 或更高維
+        pred_state = self.kalman_filter_pose.x  # 假設此處為 [x, y, vx, vy] 或更高維
         # x_pred, y_pred = pred_state[:2]
         
         # # 3. 計算目標相對於雷達或預測方向的角度 theta
@@ -278,15 +279,21 @@ class Trajectory:
         # z_radar = np.array([meas_x, meas_y, v_x, v_y])
         # # z_radar = np.array([meas_x, meas_y, pred_state[2][0], pred_state[3][0]])
 
-        # 6. 使用 Kalman filter 進行更
-        rho = np.linalg.norm([meas_x, meas_y])
-        theta = np.arctan2(meas_y, meas_x)
-        rho_dot = (meas_x * vx + meas_y * vy) / rho if rho > 1e-5 else 0
-        z_radar = [rho, theta, rho_dot]
-        self.kalman_filter_pose.R = self.kalman_filter_pose.R_RADAR
-        self.kalman_filter_pose.get_jacobian_radar()
-        # print(f"__Update Radar TrackID: {self.track_id}")
-        update_state = self.kalman_filter_pose.update_radar(z_radar).flatten().tolist()
+        # 6. 使用 Kalman filter 進行更新
+        if self.category_num in [0]: # [Car] use x, y only to update
+            z_radar = [meas_x, meas_y, pred_state[2][0], pred_state[3][0]]
+            self.kalman_filter_pose.R = self.kalman_filter_pose.R_LIDAR * 2
+            self.kalman_filter_pose.get_jacobian_lidar()
+            update_state = self.kalman_filter_pose.update(z_radar).flatten().tolist()
+        else:
+            rho = np.linalg.norm([meas_x, meas_y])
+            theta = np.arctan2(meas_y, meas_x)
+            rho_dot = (meas_x * vx + meas_y * vy) / rho if rho > 1e-5 else 0
+            z_radar = [rho, theta, rho_dot]
+            self.kalman_filter_pose.R = self.kalman_filter_pose.R_RADAR
+            self.kalman_filter_pose.get_jacobian_radar()
+            # print(f"__Update Radar TrackID: {self.track_id}")
+            update_state = self.kalman_filter_pose.update_radar(z_radar).flatten().tolist()
         
         # 7. 更新 bbox 中的相關資訊（例如全局位置、速度等）：
         #    這裡僅作示例，根據實際情況更新 fusion 信息
@@ -300,6 +307,14 @@ class Trajectory:
         
         # 8. 更新 matched_score 與其他追蹤相關資訊
         current_bbox.matched_score = matched_score
+
+        # # Radar update use the avg score in this track
+        # if len(self.bboxes) > 1:
+        #     avg_score = np.mean([bbox.det_score for bbox in self.bboxes])
+        # else:
+        #     avg_score = 0
+
+        # current_bbox.det_score = avg_score
 
         if self.track_length > self._confirmed_track_length or (
             matched_score > self._confirmed_match_score
@@ -317,6 +332,77 @@ class Trajectory:
 
         if len(self.bboxes) > self._cache_bbox_len:
             self.bboxes.pop(0)
+
+        return self.bboxes[-1]
+    
+    def fusion_update(self, bbox: BBox, radar_point, matched_score):
+        bbox.track_id = self.track_id
+        self.track_length += 1
+        bbox.track_length = self.track_length
+        self.last_updated_frame = bbox.frame_id
+        self.unmatch_length = 0
+        self.bboxes.append(bbox)
+
+        if len(self.bboxes) > self._cache_bbox_len:
+            self.bboxes.pop(0)
+
+        self.matched_scores.append(matched_score)
+        
+        global_velocity_diff = self.cal_diff_velocity()
+        self.bboxes[-1].global_velocity_diff = global_velocity_diff
+        global_velocity_curve = self.cal_curve_velocity()
+        self.bboxes[-1].global_velocity_curve = global_velocity_curve
+        
+        # ======== pose filter ==========
+        pose_mesure = self.get_measure(bbox, filter_flag="pose")   
+        radar_meas = radar_point[0:2]
+        radar_vel = radar_point[3:5]
+        if self.kalman_filter_pose.m == 2:
+            pose_mesure = pose_mesure[:2]
+        self.kalman_filter_pose.R = self.kalman_filter_pose.R_LIDAR
+        self.kalman_filter_pose.get_jacobian_lidar()
+        update_state = self.kalman_filter_pose.update(pose_mesure)
+
+        rho = np.linalg.norm([radar_meas[0], radar_meas[1]])
+        theta = np.arctan2(radar_meas[1], radar_meas[0])
+        rho_dot = (radar_meas[0] * radar_vel[0] + radar_meas[1] * radar_vel[1]) / rho if rho > 1e-5 else 0
+        z_radar = [rho, theta, rho_dot]
+        self.kalman_filter_pose.R = self.kalman_filter_pose.R_RADAR_FUSE
+        self.kalman_filter_pose.get_jacobian_radar()
+        # print(f"__Update Radar TrackID: {self.track_id}")
+        update_state = self.kalman_filter_pose.update_radar(z_radar, predict=False).flatten()
+
+        self.bboxes[-1].global_velocity_fusion = update_state[2:4].tolist()
+        
+        # ======== yaw filter ==========
+        yaw_mesure = self.get_measure(bbox, filter_flag="yaw")
+        update_yaw = self.kalman_filter_yaw.update(yaw_mesure)
+        self.bboxes[-1].global_yaw_fusion = update_yaw[0]
+        
+        # ======== size filter ==========
+        size_mesure = self.get_measure(bbox, filter_flag="size")  
+        update_size = self.kalman_filter_size.update(size_mesure)
+        update_lwh = update_size[:2].tolist() + [self.bboxes[-1].lwh[2]]
+        self.bboxes[-1].lwh_fusion = update_lwh
+
+        # ======== rv box filter ==========
+        # if self.cfg["IS_RV_MATCHING"]:
+        #     rvbox_mesure = self.get_measure(bbox, filter_flag="rvbox")  
+        #     update_rvbox = self.kalman_filter_rvbox.update(rvbox_mesure)
+        #     self.bboxes[-1].x1y1x2y2_fusion = bbox.transform_bbox_xywh2tlbr(update_rvbox[:4])
+
+        # self.bboxes[-1].global_xyz_lwh_yaw_fusion = update_xyz + update_lwh + [update_yaw[0]]
+        self.bboxes[-1].global_xyz_lwh_yaw_fusion = np.append(
+            update_state[:2], self.bboxes[-1].global_xyz_lwh_yaw[2:]
+        )
+
+        self.bboxes[-1].matched_score = matched_score 
+
+        if self.track_length > self._confirmed_track_length or (
+            matched_score > self._confirmed_match_score
+            and self.bboxes[-1].det_score > self._confirmed_det_score
+        ):
+            self.status_flag = 1
 
         return self.bboxes[-1]
 

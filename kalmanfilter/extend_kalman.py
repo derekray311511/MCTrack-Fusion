@@ -150,7 +150,7 @@ class EKF_CV(KF_Base):
     """
 
     def __init__(
-        self, n=4, m=2, dt=None, P=None, Q=None, R=None, R_RADAR=None, init_x=None, cfg=None
+        self, n=4, m=2, dt=None, P=None, Q=None, R=None, R_RADAR=None, R_RADAR_FUSE=None, init_x=None, cfg=None
     ):
         KF_Base.__init__(self, n=n, m=m, P=P, Q=Q, R=R, init_x=init_x, cfg=None)
 
@@ -161,6 +161,7 @@ class EKF_CV(KF_Base):
         self.H = self.getH(self.x)
         self.R_LIDAR = R
         self.R_RADAR = R_RADAR
+        self.R_RADAR_FUSE = R_RADAR_FUSE
 
     def f(self, x):
         # State-transition function is identity
@@ -219,7 +220,7 @@ class EKF_CV(KF_Base):
     def _normalize_angle(self, angle):
         return (angle + np.pi) % (2 * np.pi) - np.pi
 
-    def update_radar(self, z):
+    def update_radar(self, z, predict=True):
         # print(f"updateRadar: \nself.x: {self.x.flatten()}")
         px, py, vx, vy = np.array(self.x).flatten()
         rho = np.sqrt(px**2 + py**2)
@@ -233,10 +234,11 @@ class EKF_CV(KF_Base):
         y[1] = self._normalize_angle(y[1])
 
         # Predict ----------------------------------------------------
-        self.x = self.f(self.x)
-        self.F = self.getF(self.x)
-        self.P = self.F * self.P * self.F.T + self.Q
-        # print(f"predict self.x: {self.x.flatten()}")
+        if predict:
+            self.x = self.f(self.x)
+            self.F = self.getF(self.x)
+            self.P = self.F * self.P * self.F.T + self.Q
+            # print(f"predict self.x: {self.x.flatten()}")
 
         # Update -----------------------------------------------------
         Ht = self.H.T

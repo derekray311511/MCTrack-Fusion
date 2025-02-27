@@ -8,6 +8,7 @@ from tracker.matching import *
 from tracker.trajectory import Trajectory
 from utils.utils import norm_realative_radian
 from fishUtils import RadarDBSCAN, LRSegmentator
+from copy import deepcopy
 
 class Base3DTracker:
     def __init__(self, cfg):
@@ -22,7 +23,7 @@ class Base3DTracker:
             self.radar_segmentor = RadarDBSCAN(**cfg["RadarSegmentation"]["DBSCAN"])
         elif cfg["RadarSegmentation"]["method"] == "LRSegmentor":
             self.radar_segmentor = LRSegmentator(cfg["RadarSegmentation"]["LRSegmentor"])
-        elif cfg["RadarSegmentation"]["method"] == "Mix":
+        elif cfg["RadarSegmentation"]["method"] in ["Mix", "MixTrack"]:
             self.radar_segmentor_1 = LRSegmentator(cfg["RadarSegmentation"]["LRSegmentor"])
             self.radar_segmentor_2 = RadarDBSCAN(**cfg["RadarSegmentation"]["DBSCAN"])
 
@@ -80,8 +81,10 @@ class Base3DTracker:
             R_only = R_only[R_only[:, -2] == (len(frame_info.radar) - 1)]
         elif self.cfg["RadarSegmentation"]["method"] == "Mix":
             radar_data = self.radar_segmentor_1.stackRadar(frame_info.radar)
-            RL_match, L_only_temp, R_only, segRadar_1 = self.radar_segmentor_1.segmentRadar(radar_data, frame_info.bboxes)
-            radar_data = R_only[:, :6] # Remove cluster id -1 because R_only is not segmented
+            RL_match, L_only_temp, R_only, segRadar_1 = self.radar_segmentor_1.segmentRadar(radar_data[radar_data[:, -1] == (len(frame_info.radar) - 1)], frame_info.bboxes)
+            # RL_match, L_only_temp, R_only, segRadar_1 = self.radar_segmentor_1.segmentRadar(radar_data, frame_info.bboxes)
+            R_only = R_only[:, :6] # Remove cluster id -1 because R_only is not segmented
+            radar_data = np.vstack((radar_data[radar_data[:, -1] != (len(frame_info.radar) - 1)], R_only))  # remain stack radar data
             segRadar_2, assignment = self.radar_segmentor_2.segmentRadar(radar_data)
             # Concat two segmentations
             segRadar = np.vstack((segRadar_1, segRadar_2))
@@ -91,6 +94,12 @@ class Base3DTracker:
             radar_avgs = self.radar_segmentor_2.avgSegmentation(segRadar_2)
             matched_LR_indices, LR_costs = match_lidar_and_radar(L_only_temp, radar_avgs, self.cfg)
             L_only, R_only = [], []
+            # (Remove out of frame) radar and get avg
+            for match in RL_match:
+                radar = match["radar_segment"]
+                radar_avg_val = np.mean(radar[:, :5], axis=0)
+                radar = np.hstack((radar_avg_val, radar[0, 5:]))
+                match["radar_segment"] = radar
             for match in matched_LR_indices:
                 lidar_bbox = L_only_temp[match[0]]
                 radar_avg = radar_avgs[match[1]]
@@ -105,10 +114,45 @@ class Base3DTracker:
                 if i not in matched_LR_indices[:, 1]:
                     R_only.append(radar_avgs[i])
             R_only = np.array(R_only)
+        elif self.cfg["RadarSegmentation"]["method"] == "MixTrack":
+            tracks = []
+            for i, traj in enumerate(trajs):
+                bbox = traj.bboxes[-1]
+                pose = bbox.global_xyz_lwh_yaw_predict
+                new_box = deepcopy(bbox)
+                new_box.global_xyz = pose[:3]
+                tracks.append(new_box)
+            radar_data = self.radar_segmentor_1.stackRadar(frame_info.radar)
+            RL_match, L_only_temp, R_only, segRadar_1 = self.radar_segmentor_1.segmentRadar(radar_data[radar_data[:, -1] == (len(frame_info.radar) - 1)], tracks)
+            radar_data = np.vstack((radar_data[radar_data[:, -1] != (len(frame_info.radar) - 1)], R_only[R_only[:, -1] == -1][:, :-1])) # remain stack radar data that are not segmented
+            segRadar_2, assignment = self.radar_segmentor_2.segmentRadar(radar_data)
+            # Concat two segmentations
+            segRadar = np.vstack((segRadar_1, segRadar_2))
+            # Preserve only current frame radar points
+            segRadar = segRadar[segRadar[:, -2] == (len(frame_info.radar) - 1)]
+            radar_avgs = self.radar_segmentor_2.avgSegmentation(segRadar)
+            matched_LR_indices, LR_costs = match_lidar_and_radar(frame_info.bboxes, radar_avgs, self.cfg)
+            RL_match, L_only, R_only = [], [], []
+            # (Remove out of frame) radar and get avg
+            for match in matched_LR_indices:
+                lidar_bbox = frame_info.bboxes[match[0]]
+                radar_avg = radar_avgs[match[1]]
+                RL_match.append({
+                    'lidar_det': lidar_bbox,
+                    'radar_segment': radar_avg
+                })
+            for i in range(len(frame_info.bboxes)):
+                if i not in matched_LR_indices[:, 0]:
+                    L_only.append(frame_info.bboxes[i])
+            for i in range(len(radar_avgs)):
+                if i not in matched_LR_indices[:, 1]:
+                    R_only.append(radar_avgs[i])
+            R_only = np.array(R_only)
 
         # ======================== First matching ========================
         # Trajectory / LR-match lidar bboxes
         lidar_bboxes_1 = [bbox["lidar_det"] for bbox in RL_match]
+        radar_points_1 = [bbox["radar_segment"] for bbox in RL_match]
         match_res, cost_matrix = match_trajs_and_dets(
             trajs, lidar_bboxes_1, self.cfg
         )
@@ -129,6 +173,9 @@ class Base3DTracker:
                 self.all_trajs[track_id].update(
                     lidar_bboxes_1[match_res[indexes, 1][0]], cost_matrix[indexes][0]
                 )
+                # self.all_trajs[track_id].fusion_update(
+                #     lidar_bboxes_1[match_res[indexes, 1][0]], radar_points_1[match_res[indexes, 1][0]] , cost_matrix[indexes][0]
+                # )
             else:
             #     unmatched_trajs[track_id] = self.all_trajs[track_id]
             #     if not self.cfg["IS_RV_MATCHING"]:
