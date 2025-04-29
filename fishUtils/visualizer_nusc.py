@@ -87,10 +87,42 @@ class TrackVisualizer:
     def draw_lidar_pts(self, token, **kwargs):
         lidar_pc = self.read_lidar_pc(token)
         lidar_pc = lidar_pc[:, :2]  # Only take the x and y coordinates
-        lidar_pc = lidar_pc
         lidar_pc = self.ego2bev_points(lidar_pc) / self.resolution
         lidar_pc = lidar_pc + np.array([self.height // 2, self.width // 2])
-        self.draw_points(lidar_pc, **kwargs)
+        self.draw_points_fast(lidar_pc.astype(int), **kwargs)
+
+    def draw_points_fast(self, pts_px, color=(200,200,200), radius=2, alpha=0.8, **kwargs):
+        radius = max(1, int(radius * self.height / 1600.0))
+        H, W = self.image.shape[:2]
+        # 1) 建空 mask
+        mask = np.zeros((H, W), np.uint8)
+        # 2) 以 NumPy 高速散點 (超過邊界自動裁掉)
+        xs, ys = pts_px[:, 0].clip(0, W-1), pts_px[:, 1].clip(0, H-1)
+        mask[ys, xs] = 255  # O(N) 純 C 向量化
+        # 3) 若要 radius > 0，可一次 dilate：
+        if radius > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius*2+1,)*2)
+            mask = cv2.dilate(mask, k, iterations=1)    # 單次形態學
+        # 4) 把 mask 染成 BGR
+        overlay = self.image.copy()
+        overlay[mask == 255] = color
+        cv2.addWeighted(overlay, alpha, self.image, 1-alpha, 0, self.image)   # 只混一次
+
+    def draw_points(self, pts: np.ndarray, BGRcolor=(50, 50, 255), radius=4, alpha=0.8, **kwargs):
+        base_radius = 4.0 if radius is None else radius
+        radius = max(1, int(base_radius * self.height / 1600.0))
+        overlay = self.image.copy()
+        for p in pts:
+            p = np.round(p).astype(int)
+            cv2.circle(overlay, p, radius, BGRcolor, -1, lineType=cv2.LINE_AA)
+        self.image = cv2.addWeighted(self.image, 1-alpha, overlay, alpha, 0)
+
+    def draw_bboxes(self, corners: np.ndarray, BGRcolor=(255, 150, 150), thickness=2, alpha=1.0, **kwargs):
+        boxes_image = self.image.copy()
+        for box in corners:
+            box = np.round(box).astype(int)
+            cv2.drawContours(boxes_image, [box], 0, BGRcolor, thickness=thickness, lineType=cv2.LINE_AA)
+        self.image = cv2.addWeighted(self.image, 1-alpha, boxes_image, alpha, 0)
 
     def world2cam4f(self, token, cam_name):
         sample_record = self.nusc.get('sample', token)
@@ -300,50 +332,71 @@ class TrackVisualizer:
         self.cam_height = front_height
         self.cam_width = self.width
 
-    def draw_ego_car(self, img_src):
-        # Load the car image with an alpha channel (transparency)
-        car_image = cv2.imread(img_src, cv2.IMREAD_UNCHANGED)
-        car_image = cv2.rotate(car_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        alpha_channel = car_image[:, :, 3] / 255.0
-        car_image = car_image[:, :, :3]
-        car_image = car_image * alpha_channel[:, :, np.newaxis]
-        img = car_image.astype(np.uint8)
+    def draw_ego_car(self, img_src,
+                    car_width_m=3.0,    # 實車寬 (m)
+                    car_len_m =5.0):    # 實車長 (m)
+        # ---------- 1. 讀圖 (含 alpha) ----------
+        car = cv2.imread(img_src, cv2.IMREAD_UNCHANGED)
+        if car is None:
+            raise FileNotFoundError(img_src)
 
-        carSize = 3 # meters width
-        H, W = img.shape[:2]
-        new_H = int(carSize / self.resolution) + int(carSize / self.resolution) % 2
-        new_W = int(new_H * H / W) + int(new_H * H / W) % 2
-        img = cv2.resize(img, (new_H, new_W))
-        y, x = self.height // 2, self.width // 2
-        roi = self.image[y - img.shape[0] // 2 : y + img.shape[0] // 2, x - img.shape[1] // 2 : x + img.shape[1] // 2]
-        result = cv2.add(roi, img)
-        self.image[y - img.shape[0] // 2:y + img.shape[0] // 2, x - img.shape[1] // 2:x + img.shape[1] // 2] = result
+        # 強制 BGR+A 格式
+        if car.shape[2] == 3:
+            # 若沒 alpha，就把非黑像素視為 255（或自行生成）
+            alpha = 255 * np.ones(car.shape[:2], np.uint8)
+            car   = np.dstack([car, alpha])
+        # 依需要旋轉
+        car = cv2.rotate(car, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-    def draw_points(self, pts: np.ndarray, BGRcolor=(50, 50, 255), radius=4, alpha=0.8, **kwargs):
-        base_radius = 4.0 if radius is None else radius
-        radius = max(1, int(base_radius * self.height / 1600.0))
-        overlay = self.image.copy()
-        for p in pts:
-            p = np.round(p).astype(int)
-            cv2.circle(overlay, p, radius, BGRcolor, -1)
-        self.image = cv2.addWeighted(self.image, 1-alpha, overlay, alpha, 0)
+        # ---------- 2. 物理尺寸 → 像素 ----------
+        w_px = int(round(car_width_m / self.resolution))
+        h_px = int(round(car_len_m  / self.resolution))
 
-    def draw_bboxes(self, corners: np.ndarray, BGRcolor=(255, 150, 150), thickness=2, alpha=1.0, **kwargs):
-        boxes_image = self.image.copy()
-        for box in corners:
-            box = np.round(box).astype(int)
-            cv2.drawContours(boxes_image, [box], 0, BGRcolor, thickness=thickness, lineType=cv2.LINE_AA)
-        self.image = cv2.addWeighted(self.image, 1-alpha, boxes_image, alpha, 0)
+        # 保持奇數 (左右上下可對稱貼到中心)
+        if w_px % 2 == 0: w_px += 1
+        if h_px % 2 == 0: h_px += 1
+
+        # ---------- 3. 等比例縮放並透明 padding 到 (h_px, w_px) ----------
+        bh, bw = car.shape[:2]
+        scale  = min(w_px / bw, h_px / bh)
+        new_w, new_h = int(bw * scale), int(bh * scale)
+        car_rs = cv2.resize(car, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        # 建空透明畫布，將 car 貼到中間
+        car_pad = np.zeros((h_px, w_px, 4), np.uint8)
+        y0 = (h_px - new_h)//2
+        x0 = (w_px - new_w)//2
+        car_pad[y0:y0+new_h, x0:x0+new_w] = car_rs
+
+        # ---------- 4. 取 RGB 與 mask ----------
+        rgb  = car_pad[:,:,:3]
+        mask = car_pad[:,:,3]
+
+        # ---------- 5. 貼到 BEV 畫布中心 ----------
+        y_c, x_c = self.height//2, self.width//2
+        y1 = y_c - h_px//2; y2 = y1 + h_px
+        x1 = x_c - w_px//2; x2 = x1 + w_px
+
+        roi = self.image[y1:y2, x1:x2]          # 與 car_pad 同大小
+        cv2.copyTo(rgb, mask, roi)              # 透明貼圖 (OpenCV4)
+
+        # 若 cv2<4.1 無 copyTo(dst)，可:
+        # inv_mask = cv2.bitwise_not(mask)
+        # bg = cv2.bitwise_and(roi, roi, mask=inv_mask)
+        # fg = cv2.bitwise_and(rgb, rgb, mask=mask)
+        # self.image[y1:y2, x1:x2] = cv2.add(bg, fg)
+
 
     def draw_radar_pts(
         self, 
         radar_pc: list, 
         trans: np.ndarray, 
         BGRcolor=(50, 50, 255), 
-        radius=None,
+        radius=2,
         draw_vel=False, 
-        thickness=None, 
+        thickness=2, 
         alpha=0.5,
+        global_draw=False,
         **kwargs
     ):
         """Param :
@@ -359,15 +412,18 @@ class TrackVisualizer:
         for point in radar_pc:
             local_pts.append(point[:3])
 
+        # radius = max(1, int(radius * self.height / 1600.0))
+        thickness = max(1, int(thickness * self.height / 1600.0))
+
         local_pts = np.array(local_pts, dtype=float)
         local_pts = np.hstack([local_pts, np.ones((local_pts.shape[0], 1), dtype=float)])
         local_pts = (trans @ local_pts.T).T[:, :2]
         local_pts = self.ego2bev_points(local_pts)
-        # local_pts = local_pts * np.array([1, -1])
         local_pts = local_pts / self.resolution + np.array([self.height // 2, self.width // 2])
-        base_thickness = 2.0 if thickness is None else thickness
-        thickness = max(1, int(base_thickness * self.height / 1600.0))
-        self.draw_points(local_pts, BGRcolor, radius, alpha, **kwargs)
+        if global_draw:
+            self.draw_points_fast(local_pts.astype(int), BGRcolor, radius, alpha, **kwargs)
+        else:
+            self.draw_points(local_pts.astype(int), BGRcolor, radius, alpha, **kwargs)
         if draw_vel:
             vel = np.array([point[3:5] for point in radar_pc])
             vel = np.hstack([vel, np.zeros((vel.shape[0], 1))])
@@ -381,6 +437,18 @@ class TrackVisualizer:
                 })
             self._draw_vel(pt_objs, BGRcolor, thickness, alpha)
 
+    def _cluster_centroid(self, pts_int32: np.ndarray) -> tuple:
+        """ Return (x, y) centroid of Nx2 int32 array """
+        m = pts_int32.mean(axis=0)  # NumPy 求平均 2d
+        return int(m[0]), int(m[1])
+
+    def _draw_cross(self, image, center, size=10, color=(50, 50, 250), thickness=2):
+        """ 在 image 上以 X 畫中心點 """
+        x, y = center
+        d = size // 2
+        cv2.line(image, (x-d, y-d), (x+d, y+d), color, thickness, cv2.LINE_AA)
+        cv2.line(image, (x-d, y+d), (x+d, y-d), color, thickness, cv2.LINE_AA)
+
     def draw_radar_seg(
         self, 
         radarSeg: np.ndarray, 
@@ -392,6 +460,9 @@ class TrackVisualizer:
         contours=True, 
         **kwargs
     ):
+        '''
+        Input radarSeg shape: (N, 6): [x, y, z, vx, vy, clusterID]
+        '''
         if colorID and colorName:
             assert "colorID and colorName can not be True simultaneously"
         radarSeg = sorted(radarSeg, key=lambda x: x[5])
@@ -401,12 +472,12 @@ class TrackVisualizer:
                 g = list(g)
                 # BGRcolor = getColorFromID(ID=k, colorRange=(50, 255))
                 BGRcolor = getColorFromID_HSV(ID=k, cycle_num=12)
-                if contours:
-                    self.draw_cluster_polygons(np.array(g), trans, BGRcolor=BGRcolor, alpha=alphaMask, **kwargs)
                 if k == -1:  # id == -1
                     self.draw_radar_pts(g, trans, BGRcolor=BGRcolor, alpha=alphaPts, **kwargs)
                 else:
                     self.draw_radar_pts(g, trans, BGRcolor=BGRcolor, alpha=alphaPts, **kwargs)
+                if contours:
+                    self.draw_cluster_polygons(np.array(g), trans, BGRcolor=BGRcolor, alpha=alphaMask, **kwargs)
         elif colorName:
             for k, g in itertools.groupby(radarSeg, lambda x: x[5]):
                 g = list(g)
@@ -414,24 +485,25 @@ class TrackVisualizer:
                 cat_name = decodeCategory([cat_num], self.viz_cat)[0]
                 if cat_num == -1:  # id == -1
                     B, G, R = 100, 100, 100 # Gray color
+                    self.draw_radar_pts(g, trans, BGRcolor=(B, G, R), alpha=alphaPts, **kwargs)
                     if contours:
                         self.draw_cluster_polygons(np.array(g), trans, BGRcolor=BGRcolor, alpha=alphaMask, **kwargs)
-                    self.draw_radar_pts(g, trans, BGRcolor=(B, G, R), alpha=alphaPts, **kwargs)
                 else:
                     BGRcolor = self.trk_colorMap[cat_name]
+                    self.draw_radar_pts(g, trans, BGRcolor=BGRcolor, alpha=alphaPts, **kwargs)
                     if contours:
                         self.draw_cluster_polygons(np.array(g), trans, BGRcolor=BGRcolor, alpha=alphaMask, **kwargs)
-                    self.draw_radar_pts(g, trans, BGRcolor=BGRcolor, alpha=alphaPts, **kwargs)
         else:
+            self.draw_radar_pts(radarSeg, trans, BGRcolor=(210, 60, 10), alpha=alphaPts, **kwargs)
             if contours:
                 self.draw_cluster_polygons(radarSeg, trans, alpha=alphaMask, **kwargs)
-            self.draw_radar_pts(radarSeg, trans, BGRcolor=(250, 100, 50), alpha=alphaPts, **kwargs)
 
     def draw_cluster_polygons(
         self,
         radarSeg,                       # N×6, labels在 [:,5]
         trans,
-        BGRcolor=(140, 210, 40),
+        # BGRcolor=(100, 170, 0),
+        BGRcolor=(90, 150, 0),
         poly_type="hull",               # "hull" | "rect"
         mode="both",                    # "fill" | "outline" | "both"
         thickness=4,                    # 畫邊框的粗細
@@ -459,6 +531,9 @@ class TrackVisualizer:
         # ---------- 參數 ----------
         thickness = max(1, int(thickness * self.height / 1600.0))
         inflate_px = int(inflate_px * self.height / 1600.0)
+        x_size = max(1, int(12 * self.height / 1600.0))
+        x_thickness = max(1, int(2 * self.height / 1600.0))
+        x_color = (50, 50, 255)
 
         # ---------- 座標轉像素 ----------
         local_pts = []
@@ -522,6 +597,10 @@ class TrackVisualizer:
                 cv2.fillPoly(overlay, [poly], col)
             if mode in ["outline","both"]:
                 cv2.polylines(img, [poly], True, col, thickness, cv2.LINE_AA)
+
+            # === 畫中心 ===
+            center = self._cluster_centroid(pts)
+            self._draw_cross(img, center, size=x_size, color=col, thickness=x_thickness)
         
         if mode in ["fill","both"]:
             cv2.addWeighted(overlay, alpha, img, 1-alpha, 0, img)
