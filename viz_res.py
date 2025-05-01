@@ -10,7 +10,10 @@ import numpy as np
 import shutil
 import tf
 import yaml
+import subprocess             # 執行系統指令（open、xdg-open…）
 
+from pathlib import Path      # Path 物件（檔案／資料夾路徑）
+from datetime import datetime # 取當前時間、格式化字串
 from nuscenes import NuScenes
 from nuscenes.utils import splits
 from nuscenes.utils.geometry_utils import transform_matrix
@@ -218,9 +221,12 @@ def main(parser) -> None:
             print(f"Viz duration set to {trackViz.duration}")
         elif key == ord('g'):
             for win in winList:
-                win.grid = not win.grid
+                win.draw_grid_or_not = not win.draw_grid_or_not
         elif key == ord('0'):
-            cfg["VISUALIZER"]["daynight"] = not cfg["VISUALIZER"]["daynight"]
+            cfg["VISUALIZER"]["daynight"] = 'day' if cfg["VISUALIZER"]["daynight"] == 'night' else 'night'
+            for win in winList:
+                win.switch_daynight(setting=cfg["VISUALIZER"]["daynight"])
+                win.reset()
         elif key == ord('i'):
             cfg["VISUALIZER"]["trkBox"]["draw_id"] = not cfg["VISUALIZER"]["trkBox"]["draw_id"]
         elif key == ord('c'):
@@ -267,6 +273,16 @@ def main(parser) -> None:
                 if det_idx != idx:
                     idx = det_idx
                     break
+        elif key == ord('p'):                      # p  ➜  save picture
+            out_dir = Path('results/screenshots')
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts   = datetime.now().strftime('%Y%m%d-%H%M%S')
+            method_1, method_2 = "DBSCAN", "TrackPrior"
+            name_1 = f'{method_1}-frame{idx:05d}-{ts}.png'
+            name_2 = f'{method_2}-frame{idx:05d}-{ts}.png'
+            cv2.imwrite(str(out_dir/name_1), trackViz.image)
+            cv2.imwrite(str(out_dir/name_2), trackViz2.image)
+            print(f"Screenshot saved: \n{out_dir}/{name_1}\n{out_dir}/{name_2}")
                     
 
         if idx < 0:
@@ -300,19 +316,16 @@ def main(parser) -> None:
         # if len(gt) > 0:
         #     trackViz.play = False
 
-        # Day and night color define
+        # Day and Night color define
         BGRcolor_nameList = ["lidarPts", "radarPts", "groundTruth", "trkBox", "detBox"]
-        if cfg["VISUALIZER"]["daynight"]:
-            cfg["VISUALIZER"]["background_color"] = cfg["VISUALIZER"]["day_background_color"]
+        if cfg["VISUALIZER"]["daynight"] == 'day':
+            car_imgFile = "/data/Nuscenes/GPT_blackCar1.png" 
             for name in BGRcolor_nameList:
                 cfg["VISUALIZER"][name]["BGRcolor"] = cfg["VISUALIZER"][name]["day_BGRcolor"]
         else:
-            cfg["VISUALIZER"]["background_color"] = cfg["VISUALIZER"]["night_background_color"]
+            car_imgFile = "/data/Nuscenes/car1.png"
             for name in BGRcolor_nameList:
                 cfg["VISUALIZER"][name]["BGRcolor"] = cfg["VISUALIZER"][name]["night_BGRcolor"]
-        for win in winList:
-            win.background_color = np.array(cfg["VISUALIZER"]["background_color"], dtype=np.uint8)
-            win.reset()
 
         frame_name = "{}-{}".format(timestamp, idx)
 
@@ -332,21 +345,16 @@ def main(parser) -> None:
                 trackViz2.draw_det_bboxes(trk_res.trk2[hist_token], trans, **cfg["VISUALIZER"]["trkBox"])
             cfg["VISUALIZER"]["trkBox"]["alpha"] = origin_alpha
 
-        car_imgFile = ""
-        if cfg["VISUALIZER"]["daynight"]:
-            car_imgFile = "/data/Nuscenes/GPT_blackCar1.png" 
-        else:
-            car_imgFile = "/data/Nuscenes/car1.png"
-
         start = time.time()
-        trackViz.draw_ego_car(img_src=car_imgFile)
-        trackViz2.draw_ego_car(img_src=car_imgFile)
+        for win in winList:
+            win.reset()
+            win.draw_ego_car(img_src=car_imgFile)
         end = time.time()
         print(f"Draw ego time: {(end - start) * 1000:.2f} ms")
         start = time.time()
         if cfg["VISUALIZER"]["lidarPts"]["draw"]:
             trackViz.draw_lidar_pts(token, **cfg["VISUALIZER"]["lidarPts"])
-            trackViz2.draw_lidar_pts(token, **cfg["VISUALIZER"]["lidarPts"])
+            trackViz2.draw_lidar_pts(token, **cfg["VISUALIZER"]["lidarPts"], cache=trackViz._lidar_cache)
         end = time.time()
         print(f"Lidar pts time: {(end - start) * 1000:.2f} ms")
         if cfg["VISUALIZER"]["radarPts"]["draw"]:
@@ -384,7 +392,7 @@ def main(parser) -> None:
             trk1 = trk1 if cfg["VISUALIZER"]["trkBox"]["draw"] else []
             trk2 = trk2 if cfg["VISUALIZER"]["trkBox"]["draw"] else []
             trackViz.draw_camera_images(token, trk1, **cfg["VISUALIZER"]["trkBox"])
-            trackViz2.draw_camera_images(token, trk2, **cfg["VISUALIZER"]["trkBox"])
+            trackViz2.draw_camera_images(token, trk2, **cfg["VISUALIZER"]["trkBox"], imgs=trackViz._cam_cache)
         end = time.time()
         print(f"Draw camera time: {(end - start) * 1000:.2f} ms")
         start = time.time()

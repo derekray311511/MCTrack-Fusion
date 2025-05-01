@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation as R
 from copy import deepcopy
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.geometry_utils import transform_matrix
+from concurrent.futures import ThreadPoolExecutor
 
 class TrackVisualizer:
     def __init__(
@@ -23,8 +24,7 @@ class TrackVisualizer:
         windowSize: tuple = (800, 800),
         imgSize: tuple = (1600, 1600), 
         duration: float = 0.5,
-        background_color: tuple = (50, 50, 50),
-        grid: bool = True,
+        background_color: tuple = ((249, 249, 249), (50, 50, 50)),
         frameRate: int = 2,
         **kwargs,
     ):
@@ -41,10 +41,19 @@ class TrackVisualizer:
         self.windowName = windowName
         self.window = cv2.namedWindow(self.windowName, cv2.WINDOW_NORMAL)
         self.windowSize = np.array(windowSize, dtype=np.uint8)
-        self.background_color = np.array(background_color, dtype=np.uint8)
-        self.grid = grid
+        self.grid_cfg = kwargs.get('grid_cfg', None) 
+        self.draw_grid_or_not = self.grid_cfg.get('draw', False) if self.grid_cfg else False
+        self.border_cfg = kwargs.get('border', None)
         self.frameRate = frameRate
-        self.image = np.ones((self.height, self.width, 3), dtype=np.uint8) * self.background_color
+        self._grid_cache, self._grid_ready = None, False
+        self._car_cache = None
+        self._lidar_cache = None
+        self._cam_cache = None
+        self._executor = ThreadPoolExecutor(max_workers=6)  # one thread per camera view
+        self.DAYNIGHT = kwargs.get('daynight', 'night')   # True: day, False: night
+        self.DAYNIGHT_MAP = {'day': 0, 'night': 1}
+        self.background_color = np.array(background_color, dtype=np.uint8)
+        self.reset()
         
         cv2.resizeWindow(self.windowName, windowSize)
         print(f"window: {self.windowName}")
@@ -56,7 +65,26 @@ class TrackVisualizer:
 
     def reset(self):
         self.cam_height, self.cam_width = 0, 0
-        self.image = np.ones((self.height, self.width, 3), dtype=np.uint8) * self.background_color
+        self.image = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        bg_color = self.background_color[self.DAYNIGHT_MAP[self.DAYNIGHT]]
+        cv2.rectangle(self.image, (0,0), (self.width, self.height), bg_color.tolist(), thickness=cv2.FILLED)
+        self._cam_cache = None
+        self._lidar_cache = None
+
+    def clear_cache(self):
+        self._grid_cache, self._grid_ready = None, False
+        self._car_cache = None
+        self._cam_cache = None
+        self._lidar_cache = None
+
+    def switch_daynight(self, setting=None):
+        if setting is not None:
+            self.DAYNIGHT = setting
+        elif self.DAYNIGHT == 'day':
+            self.DAYNIGHT = 'night'
+        else:
+            self.DAYNIGHT = 'day'
+        self.clear_cache()
 
     def read_lidar_pc(self, token):
         sample_record = self.nusc.get('sample', token)
@@ -84,29 +112,37 @@ class TrackVisualizer:
         point_cloud = point_cloud.reshape(-1, 4)[:, :3]
         return point_cloud
 
-    def draw_lidar_pts(self, token, **kwargs):
-        lidar_pc = self.read_lidar_pc(token)
-        lidar_pc = lidar_pc[:, :2]  # Only take the x and y coordinates
-        lidar_pc = self.ego2bev_points(lidar_pc) / self.resolution
-        lidar_pc = lidar_pc + np.array([self.height // 2, self.width // 2])
-        self.draw_points_fast(lidar_pc.astype(int), **kwargs)
+    def draw_lidar_pts(self, token, cache=None, **kwargs):
+        lidar_pc = None
+        if cache is None:
+            lidar_pc = self.read_lidar_pc(token)
+            lidar_pc = lidar_pc[:, :2]  # Only take the x and y coordinates
+            lidar_pc = self.ego2bev_points(lidar_pc) / self.resolution
+            lidar_pc = lidar_pc + np.array([self.height // 2, self.width // 2])
+            lidar_pc = lidar_pc.astype(int)
+        _, overlay = self.draw_points_fast(lidar_pc, cache=cache, **kwargs)
+        self._lidar_cache = overlay
 
-    def draw_points_fast(self, pts_px, color=(200,200,200), radius=2, alpha=0.8, **kwargs):
-        radius = max(1, int(radius * self.height / 1600.0))
-        H, W = self.image.shape[:2]
-        # 1) 建空 mask
-        mask = np.zeros((H, W), np.uint8)
-        # 2) 以 NumPy 高速散點 (超過邊界自動裁掉)
-        xs, ys = pts_px[:, 0].clip(0, W-1), pts_px[:, 1].clip(0, H-1)
-        mask[ys, xs] = 255  # O(N) 純 C 向量化
-        # 3) 若要 radius > 0，可一次 dilate：
-        if radius > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius*2+1,)*2)
-            mask = cv2.dilate(mask, k, iterations=1)    # 單次形態學
-        # 4) 把 mask 染成 BGR
-        overlay = self.image.copy()
-        overlay[mask == 255] = color
+    def draw_points_fast(self, pts_px, color=(200,200,200), radius=2, alpha=0.8, cache=None, **kwargs):
+        if cache is None:
+            radius = max(1, int(radius * self.height / 1600.0))
+            H, W = self.image.shape[:2]
+            # 1) 建空 mask
+            mask = np.zeros((H, W), np.uint8)
+            # 2) 以 NumPy 高速散點 (超過邊界自動裁掉)
+            xs, ys = pts_px[:, 0].clip(0, W-1), pts_px[:, 1].clip(0, H-1)
+            mask[ys, xs] = 255  # O(N) 純 C 向量化
+            # 3) 若要 radius > 0，可一次 dilate：
+            if radius > 0:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius*2+1,)*2)
+                mask = cv2.dilate(mask, k, iterations=1)    # 單次形態學
+            # 4) 把 mask 染成 BGR
+            overlay = self.image.copy()
+            overlay[mask == 255] = color
+        else:
+            overlay = cache
         cv2.addWeighted(overlay, alpha, self.image, 1-alpha, 0, self.image)   # 只混一次
+        return self.image, overlay
 
     def draw_points(self, pts: np.ndarray, BGRcolor=(50, 50, 255), radius=4, alpha=0.8, **kwargs):
         base_radius = 4.0 if radius is None else radius
@@ -175,10 +211,29 @@ class TrackVisualizer:
             images.update({name: img})
         img_front = np.hstack([images[name_list[0]], images[name_list[1]], images[name_list[2]]])
         img_back = np.hstack([images[name_list[3]], images[name_list[4]], images[name_list[5]]])
-        # Save image
-        # cv2.imwrite("screenshot/images/" + token + "_front.jpg", img_front)
-        # cv2.imwrite("screenshot/images/" + token + "_back.jpg", img_back)
         return img_front, img_back
+    
+    def _load_img(self, path):
+        return cv2.imread(str(path), cv2.IMREAD_COLOR)
+
+    def load_cams_parallel(self, sample_record, name_list):
+        # prepare absolute paths -------------------------------------------------
+        paths = []
+        for sensor in name_list:
+            sd_record = self.nusc.get('sample_data', sample_record['data'][sensor])
+            filename = sd_record['filename']
+            filename = os.path.join(self.nusc_cfg['dataroot'], filename)
+            paths.append(filename)
+
+        # submit tasks -----------------------------------------------------------
+        futs = [self._executor.submit(self._load_img, p) for p in paths]
+
+        # gather (keeps order) ---------------------------------------------------
+        imgs = {cam: fut.result() for cam, fut in zip(name_list, futs)}
+
+        # cache images ---------------------------------------------------
+        self._cam_cache = imgs
+        return imgs
 
     def draw_camera_images(self, token, boxes=[], BGRcolor=(255, 50, 50), colorID=False, imgs=None, **kwargs):
         """
@@ -199,9 +254,6 @@ class TrackVisualizer:
             scale_factor = target_width / w
             new_height = int(h * scale_factor)
             return cv2.resize(image, (target_width, new_height), interpolation=cv2.INTER_LINEAR)
-        
-        # # 獲取前相機和後相機的圖像
-        # front_image, rear_image = self.get_camera_images(token)
 
         color = np.array(BGRcolor, dtype=np.float32) / 255.0
         base_color = np.clip(color, a_min=0, a_max=1)
@@ -226,24 +278,19 @@ class TrackVisualizer:
             'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 
             'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT'
         ]
-        imgs = {} if imgs is None else imgs
+        if imgs is None:
+            imgs = self.load_cams_parallel(sample_record, name_list)
+
         for sensor in name_list:
 
-            if sensor in imgs:
-                img = imgs[sensor]
-            else:
-                sd_record = self.nusc.get('sample_data', sample_record['data'][sensor])
-                filename = sd_record['filename']
-                filename = os.path.join(self.nusc_cfg['dataroot'], filename)
-                img = cv2.imread(filename)
-
             transform = self.world2cam4f(token, sensor)
+            img = imgs[sensor]
 
             num_bboxes = bboxes_corners.shape[0]
             coords = np.concatenate(
                 [bboxes_corners.reshape(-1, 3), np.ones((num_bboxes * 8, 1))], axis=-1
             )
-            transform = deepcopy(transform).reshape(4, 4)
+            transform = transform.reshape(4, 4)
             coords = coords @ transform.T
             coords = coords.reshape(-1, 8, 4)
 
@@ -336,37 +383,42 @@ class TrackVisualizer:
                     car_width_m=3.0,    # 實車寬 (m)
                     car_len_m =5.0):    # 實車長 (m)
         # ---------- 1. 讀圖 (含 alpha) ----------
-        car = cv2.imread(img_src, cv2.IMREAD_UNCHANGED)
-        if car is None:
-            raise FileNotFoundError(img_src)
+        if self._car_cache is None:
+            car = cv2.imread(img_src, cv2.IMREAD_UNCHANGED)
+            if car is None:
+                raise FileNotFoundError(img_src)
 
-        # 強制 BGR+A 格式
-        if car.shape[2] == 3:
-            # 若沒 alpha，就把非黑像素視為 255（或自行生成）
-            alpha = 255 * np.ones(car.shape[:2], np.uint8)
-            car   = np.dstack([car, alpha])
-        # 依需要旋轉
-        car = cv2.rotate(car, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            # 強制 BGR+A 格式
+            if car.shape[2] == 3:
+                # 若沒 alpha，就把非黑像素視為 255（或自行生成）
+                alpha = 255 * np.ones(car.shape[:2], np.uint8)
+                car   = np.dstack([car, alpha])
+            # 依需要旋轉
+            car = cv2.rotate(car, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        # ---------- 2. 物理尺寸 → 像素 ----------
-        w_px = int(round(car_width_m / self.resolution))
-        h_px = int(round(car_len_m  / self.resolution))
+            # ---------- 2. 物理尺寸 → 像素 ----------
+            w_px = int(round(car_width_m / self.resolution))
+            h_px = int(round(car_len_m  / self.resolution))
 
-        # 保持奇數 (左右上下可對稱貼到中心)
-        if w_px % 2 == 0: w_px += 1
-        if h_px % 2 == 0: h_px += 1
+            # 保持奇數 (左右上下可對稱貼到中心)
+            if w_px % 2 == 0: w_px += 1
+            if h_px % 2 == 0: h_px += 1
 
-        # ---------- 3. 等比例縮放並透明 padding 到 (h_px, w_px) ----------
-        bh, bw = car.shape[:2]
-        scale  = min(w_px / bw, h_px / bh)
-        new_w, new_h = int(bw * scale), int(bh * scale)
-        car_rs = cv2.resize(car, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            # ---------- 3. 等比例縮放並透明 padding 到 (h_px, w_px) ----------
+            bh, bw = car.shape[:2]
+            scale  = min(w_px / bw, h_px / bh)
+            new_w, new_h = int(bw * scale), int(bh * scale)
+            car_rs = cv2.resize(car, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        # 建空透明畫布，將 car 貼到中間
-        car_pad = np.zeros((h_px, w_px, 4), np.uint8)
-        y0 = (h_px - new_h)//2
-        x0 = (w_px - new_w)//2
-        car_pad[y0:y0+new_h, x0:x0+new_w] = car_rs
+            # 建空透明畫布，將 car 貼到中間
+            car_pad = np.zeros((h_px, w_px, 4), np.uint8)
+            y0 = (h_px - new_h)//2
+            x0 = (w_px - new_w)//2
+            car_pad[y0:y0+new_h, x0:x0+new_w] = car_rs
+            self._car_cache = car_pad
+        else:
+            car_pad = self._car_cache
+            w_px, h_px = car_pad.shape[1], car_pad.shape[0]
 
         # ---------- 4. 取 RGB 與 mask ----------
         rgb  = car_pad[:,:,:3]
@@ -467,6 +519,10 @@ class TrackVisualizer:
             assert "colorID and colorName can not be True simultaneously"
         radarSeg = sorted(radarSeg, key=lambda x: x[5])
         radarSeg = np.array(radarSeg)
+        # Default BGR color
+        colors = kwargs.get('color', ((210, 60, 10), (100, 170, 0)))[self.DAYNIGHT_MAP[self.DAYNIGHT]]
+        colorPts = colors[0]
+        colorMask = colors[1]
         if colorID:
             for k, g in itertools.groupby(radarSeg, lambda x: x[5]):
                 g = list(g)
@@ -494,21 +550,21 @@ class TrackVisualizer:
                     if contours:
                         self.draw_cluster_polygons(np.array(g), trans, BGRcolor=BGRcolor, alpha=alphaMask, **kwargs)
         else:
-            self.draw_radar_pts(radarSeg, trans, BGRcolor=(210, 60, 10), alpha=alphaPts, **kwargs)
+            self.draw_radar_pts(radarSeg, trans, BGRcolor=colorPts, alpha=alphaPts, **kwargs)
             if contours:
-                self.draw_cluster_polygons(radarSeg, trans, alpha=alphaMask, **kwargs)
+                self.draw_cluster_polygons(radarSeg, trans, BGRcolor=colorMask, alpha=alphaMask, **kwargs)
 
     def draw_cluster_polygons(
         self,
         radarSeg,                       # N×6, labels在 [:,5]
         trans,
-        # BGRcolor=(100, 170, 0),
         BGRcolor=(90, 150, 0),
         poly_type="hull",               # "hull" | "rect"
         mode="both",                    # "fill" | "outline" | "both"
         thickness=4,                    # 畫邊框的粗細
         alpha=0.4,
         inflate_px=8,                   # ★ 向外擴幾個 pixel (0 = 不膨脹)
+        draw_center=False,
         **kwargs
     ):
         if radarSeg.shape[0] == 0:
@@ -599,8 +655,9 @@ class TrackVisualizer:
                 cv2.polylines(img, [poly], True, col, thickness, cv2.LINE_AA)
 
             # === 畫中心 ===
-            center = self._cluster_centroid(pts)
-            self._draw_cross(img, center, size=x_size, color=col, thickness=x_thickness)
+            if draw_center:
+                center = self._cluster_centroid(pts)
+                self._draw_cross(img, center, size=x_size, color=col, thickness=x_thickness)
         
         if mode in ["fill","both"]:
             cv2.addWeighted(overlay, alpha, img, 1-alpha, 0, img)
@@ -1007,29 +1064,23 @@ class TrackVisualizer:
             cv2.line(img, (0, y), (w, y), color=color, thickness=thickness)
 
         return img
-
-    def draw_grid(self, image, diff=10, color=(0, 255, 0), thickness=1, alpha=1.0):
+    
+    def draw_grid(self, image, diff=10, color=(0, 255, 0), thickness=1):
         """ Draw grid from image center """
-        # h, w, _ = image.shape
         h, w = self.height, self.width
-        if self.cam_height:
-            h_shift = self.cam_height
-        else:
-            h_shift = 0
-        color = np.array(color) * alpha
 
         # draw vertical lines
         x = w // 2
         while(x < w):
-            cv2.line(image, (x, 0 + h_shift), (x, h + h_shift), color=color, thickness=thickness)
-            cv2.line(image, (w-x, 0 + h_shift), (w-x, h + h_shift), color=color, thickness=thickness)
+            cv2.line(image, (x, 0), (x, h), color=color, thickness=thickness)
+            cv2.line(image, (w-x, 0), (w-x, h), color=color, thickness=thickness)
             x += int(round((diff / self.resolution)))
         
         # draw horizontal lines
         y = h // 2
         while(y < h):
-            cv2.line(image, (0, y + h_shift), (w, y + h_shift), color=color, thickness=thickness)
-            cv2.line(image, (0, h-y + h_shift), (w, h-y + h_shift), color=color, thickness=thickness)
+            cv2.line(image, (0, y), (w, y), color=color, thickness=thickness)
+            cv2.line(image, (0, h-y), (w, h-y), color=color, thickness=thickness)
             y += int(round((diff / self.resolution)))
 
         return image
@@ -1037,21 +1088,89 @@ class TrackVisualizer:
     def draw_img_boundary(self, BGRcolor=(255, 255, 255), thickness=4):
         x, y, w, h = 0, 0, self.image.shape[1], self.image.shape[0]
         cv2.rectangle(self.image, (x, y), (x+w, y+h), BGRcolor, thickness)
+
+    def _build_grid_cache(self):
+        h, w = self.height, self.width
+        cy, cx = h // 2, w // 2
+        if self.cam_height > 0:
+            grid_img = np.zeros((h, w, 3), dtype=np.uint8)
+            grid_img[0 : self.height, :] = self.image[self.cam_height : self.cam_height + self.height, :]
+        else:
+            grid_img = self.image.copy()
+        GRID_STEP_M = self.grid_cfg["GRID_STEP_M"]
+        STEP_LARGE = GRID_STEP_M[0]
+        STEP_SMALL  = GRID_STEP_M[1]
+        GRID_COLOR = self.grid_cfg["GRID_COLOR"][self.DAYNIGHT_MAP[self.DAYNIGHT]]
+        GRID_TK = self.grid_cfg["GRID_TK"]
+        GRID_ALPHA = self.grid_cfg["GRID_ALPHA"]
+        TEXT_COLOR = self.grid_cfg["TEXT_COLOR"][self.DAYNIGHT_MAP[self.DAYNIGHT]]
+        thickness_thick = GRID_TK[0] * self.height // 1600
+        thickness_light = GRID_TK[1] * self.height // 1600
+        # grid_img = self.draw_grid(grid_img, diff=GRID_STEP_M[1], color=GRID_COLOR[1], thickness=thickness_light)
+        # grid_img = self.draw_grid(grid_img, diff=GRID_STEP_M[0], color=GRID_COLOR[0], thickness=thickness_thick)
+        # --- 兩條距離尺 + 字 ---
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8 * self.height / 1600.0
+        font_tk = max(1, int(2 * self.height / 1600.0))
+        cv2.line(grid_img, (cx, cy), (cx, 0), GRID_COLOR[0], thickness_thick)  # y axis
+        cv2.line(grid_img, (cx, cy), (0, cy), GRID_COLOR[0], thickness_thick)  # x axis
+        for meter in range(0, self.range[0] // 2 + 1, STEP_SMALL):
+            if meter == 0:
+                continue
+            meter_px = int(meter / self.resolution)
+            tick_len = int(STEP_LARGE * 0.025 / self.resolution)
+            cv2.line(grid_img, (cx - tick_len, cy - meter_px), (cx + tick_len, cy - meter_px), GRID_COLOR[0], thickness_light)  # y axis tick
+            cv2.line(grid_img, (cx - meter_px, cy - tick_len), (cx - meter_px, cy + tick_len), GRID_COLOR[0], thickness_light)  # x axis tick
+        for meter in range(0, self.range[0] // 2 + 1, STEP_LARGE):
+            meter_px = int(meter / self.resolution)
+            shift_px = int(font_scale * 15)
+            tick_len = int(STEP_LARGE * 0.05 / self.resolution)
+            if meter != 0:
+                cv2.circle(grid_img, (cx, cy), meter_px, GRID_COLOR[0], thickness_light, lineType=cv2.LINE_AA)
+                cv2.line(grid_img, (cx - tick_len, cy - meter_px), (cx + tick_len, cy - meter_px), GRID_COLOR[0], thickness_thick)  # y axis tick
+                cv2.line(grid_img, (cx - meter_px, cy - tick_len), (cx - meter_px, cy + tick_len), GRID_COLOR[0], thickness_thick)  # x axis tick
+            cv2.putText(grid_img, f'{meter:.0f} m', (cx + shift_px, cy - meter_px + shift_px*2),
+                        font, font_scale, TEXT_COLOR, font_tk, cv2.LINE_AA)
+            cv2.putText(grid_img, f'{meter:.0f} m', (cx - meter_px + shift_px, cy + shift_px*2),
+                        font, font_scale, TEXT_COLOR, font_tk, cv2.LINE_AA)
+        self._grid_cache  = grid_img       # BGR
+        self._grid_ready  = True           # flag
+
+    def draw_grid_overlay(self):
+        """
+        將格線貼到 BEV 畫面，不影響 camera 圖層
+        ────────────────────────────────────────────
+        self._grid_cache : H_bev x W x 3 uint8   事先 build 好的格線圖
+        self.GRID_ALPHA  : 0.0 - 1.0  混合權重
+        self.cam_height  : camera 圖層高度 (若沒有就 0)
+        """
+        ALPHA = self.grid_cfg["ALPHA"]
+        self._build_grid_cache()
+
+        y0 = getattr(self, 'cam_height', 0)          # camera 區高度，預設 0
+        y1 = y0 + self.height                        # BEV 區下界
+        x0, x1 = 0, self.width
+
+        # ---- 只取 BEV 影像 ROI ----
+        roi_img  = self.image[y0:y1, x0:x1]          # H_bev×W×3
+        grid_img = self._grid_cache                  # 同尺寸
+
+        # ---- 貼格線（單次 SIMD）----
+        cv2.addWeighted(roi_img, 1.0 - ALPHA,
+                        grid_img, ALPHA,
+                        0, dst=roi_img)
         
     def show(self):
         """
         show and reset the image
         """
-        if self.grid:
-            thickness_small = int(0.250 / self.resolution)
-            thickness_large = int(0.375 / self.resolution)
-            grid_image = np.ones_like(self.image, dtype=np.uint8)
-            grid_image = self.draw_grid(grid_image, diff=10, color=(255, 255, 255), thickness=thickness_small, alpha=0.3)
-            grid_image = self.draw_grid(grid_image, diff=50, color=(0, 0, 255), thickness=thickness_large, alpha=0.5)
-            self.image = cv2.addWeighted(grid_image, 0.5, self.image, 1.0, 0)
-        self.draw_img_boundary()
+        BORDER_COLOR = self.border_cfg["BGRcolor"][self.DAYNIGHT_MAP[self.DAYNIGHT]]
+        BORDER_TK    = self.border_cfg["thickness"] * self.height // 1600
+        if self.draw_grid_or_not:
+            self.draw_grid_overlay()
+        self.draw_img_boundary(BGRcolor=BORDER_COLOR, thickness=BORDER_TK)
         cv2.imshow(self.windowName, self.image)
-        self.reset()
+        # self.reset()
 
 def getColorFromID(baseColor=(100, 100, 100), colorRange=(155, 255), ID=-1) -> tuple:
     if ID == -1:  # id == -1
